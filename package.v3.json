@@ -1,0 +1,15 @@
+{
+  "NodeSeekSignCustom": {
+    "name": "NodeSeek 签到助手",
+    "description": "提供浏览器签到入口、每日提醒和确认记录。",
+    "labels": "论坛签到,提醒",
+    "version": "0.1.0",
+    "icon": "",
+    "author": "Azhz-Zhong",
+    "level": 1,
+    "system_version": ">=3.2.12",
+    "history": {
+      "v0.1.0": "发布浏览器签到入口、每日提醒和本地确认记录。"
+    }
+  }
+}

@@ -3,12 +3,11 @@
 from dataclasses import dataclass
 import json
 import re
-from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+import requests
 
 
 FORUM_URL = "https://www.nodeseek.com/"
-USER_AGENT = "MoviePilot-NodeSeekSignCustom/0.2.0"
+USER_AGENT = "MoviePilot-NodeSeekSignCustom/0.3.0"
 SESSION_KEYS = ("session", "pjwt")
 COOKIE_VALUE = re.compile(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}\Z")
 MAX_RESPONSE = 64 * 1024
@@ -21,18 +20,11 @@ class AttendanceResult:
     gain: int | None = None
 
 
-class NoRedirect(HTTPRedirectHandler):
-    """Keep the account session on the configured forum origin."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def normalize_cookie(header: str) -> str:
     """Retain only the first-party account session keys."""
-    if len(header) > 16_384 or any(char in header for char in ("\r", "\n", "\x00")):
-        raise ValueError("Cookie 格式无效，请粘贴单行会话内容。")
     header = header.strip()
+    if len(header) > 16_384 or any(char in header for char in ("\r", "\n", "\x00")):
+        raise ValueError("Cookie 格式无效，请粘贴浏览器复制的单行 Cookie。")
     if header[:7].lower() == "cookie:":
         header = header[7:].strip()
     cookies = {}
@@ -52,6 +44,8 @@ def _blocked(code, headers):
         return AttendanceResult("verification", "站点要求浏览器验证，自动签到已暂停。")
     if code in (401, 403) or 300 <= code < 400:
         return AttendanceResult("session_required", "会话未获授权，请在浏览器登录后更新 Cookie。")
+    if code == 407:
+        return AttendanceResult("proxy_error", "系统代理需要有效认证，请检查 MoviePilot 网络设置。")
     if code == 429:
         return AttendanceResult("rate_limited", "站点限制当前请求，下次计划时间再检查。")
     if code >= 500:
@@ -85,27 +79,37 @@ def interpret_result(body: bytes) -> AttendanceResult:
     return AttendanceResult("failed", "站点未确认签到，请在论坛页面查看。")
 
 
-def submit_attendance(cookie: str, random_reward: bool) -> AttendanceResult:
-    """Make one HTTPS request and report the outcome without replaying it."""
-    request = Request(
-        FORUM_URL + "api/attendance?random=" + str(random_reward).lower(),
-        method="POST",
-        headers={"Cookie": cookie, "Accept": "application/json", "User-Agent": USER_AGENT},
-    )
-    opener = build_opener(ProxyHandler({}), NoRedirect())
+def submit_attendance(
+    cookie: str, random_reward: bool, *, proxy_url: str | None = None
+) -> AttendanceResult:
+    """Send exactly one HTTPS POST using the selected network route."""
+    headers = {"Cookie": cookie, "Accept": "application/json", "User-Agent": USER_AGENT}
     try:
-        with opener.open(request, timeout=12) as response:
-            blocked = _blocked(response.status, response.headers)
-            if blocked is not None:
-                return blocked
-            body = response.read(MAX_RESPONSE + 1)
-    except HTTPError as error:
-        try:
-            return _blocked(error.code, error.headers) or AttendanceResult("failed", "签到请求被拒绝。")
-        finally:
-            error.close()
-    except (URLError, OSError):
+        with requests.Session() as session:
+            session.trust_env = False
+            proxies = {"https": proxy_url} if proxy_url else {}
+            with session.post(
+                FORUM_URL + "api/attendance",
+                params={"random": str(random_reward).lower()},
+                headers=headers,
+                timeout=(6, 12),
+                proxies=proxies,
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                blocked = _blocked(response.status_code, response.headers)
+                if blocked is not None:
+                    return blocked
+                body = bytearray()
+                for chunk in response.iter_content(chunk_size=8192):
+                    if len(body) + len(chunk) > MAX_RESPONSE:
+                        return AttendanceResult("uncertain", "站点响应超出预期，请在浏览器核对今天的结果。")
+                    body.extend(chunk)
+    except (requests.exceptions.ProxyError, requests.exceptions.InvalidProxyURL, requests.exceptions.InvalidSchema):
+        return AttendanceResult("proxy_error", "无法连接系统代理，请检查 MoviePilot 网络设置。")
+    except requests.exceptions.ConnectTimeout:
+        status = "proxy_error" if proxy_url else "connect_error"
+        return AttendanceResult(status, "连接超时，请检查当前网络或系统代理。")
+    except requests.exceptions.RequestException:
         return AttendanceResult("uncertain", "连接中断，签到结果未知。请在浏览器核对今天的结果。")
-    if len(body) > MAX_RESPONSE:
-        return AttendanceResult("uncertain", "站点响应超出预期，请在浏览器核对今天的结果。")
     return interpret_result(body)

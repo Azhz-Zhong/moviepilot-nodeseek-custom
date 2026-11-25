@@ -8,7 +8,9 @@ from threading import RLock
 
 from apscheduler.triggers.cron import CronTrigger
 
+from app.schemas.types import MessageType
 from app.sdk import scheduler
+from app.sdk.config import settings
 from app.sdk.logging import logger
 from app.sdk.plugin import _PluginBase
 
@@ -27,9 +29,11 @@ STATUS = {
     "pending": "请求进行中", "uncertain": "结果待确认", "failed": "失败",
     "verification": "需要浏览器验证", "session_required": "需要更新 Cookie",
     "rate_limited": "请求受限", "skipped": "跳过", "configured": "已保存会话", "config_error": "配置失败",
+    "proxy_required": "代理未配置", "proxy_error": "代理连接失败", "connect_error": "网络连接超时",
 }
 DEFAULTS = {
     "auto_enabled": False, "attendance_time": "08:30", "random_reward": False,
+    "use_proxy": True, "notify": False,
     "session_cookie": "", "run_once": False, "confirm_today": False, "clear_cookie": False,
 }
 
@@ -52,7 +56,7 @@ class NodeSeekSignCustom(_PluginBase):
     plugin_name = "NS每日签到"
     plugin_desc = "Cookie 自动签到、收益图表和执行日志。"
     plugin_icon = "https://raw.githubusercontent.com/Azhz-Zhong/moviepilot-nodeseek-custom/main/icons/nodeseek.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.3.0"
     plugin_author = "Azhz-Zhong"
     author_url = "https://github.com/Azhz-Zhong"
     plugin_config_prefix = "nodeseeksigncustom_"
@@ -66,6 +70,8 @@ class NodeSeekSignCustom(_PluginBase):
         self._enabled = False
         self._time = DEFAULTS["attendance_time"]
         self._random_reward = False
+        self._use_proxy = DEFAULTS["use_proxy"]
+        self._notify = DEFAULTS["notify"]
 
     def init_plugin(self, config=None):
         """Apply settings and consume write-only inputs and one-time actions."""
@@ -81,6 +87,8 @@ class NodeSeekSignCustom(_PluginBase):
             value = clean.get("attendance_time", clean.get("reminder_time", DEFAULTS["attendance_time"]))
             self._time = value.strip() if isinstance(value, str) else ""
             self._random_reward = clean.get("random_reward") is True
+            self._use_proxy = clean.get("use_proxy", DEFAULTS["use_proxy"]) is True
+            self._notify = clean.get("notify") is True
             if clean != config:
                 self.update_config(clean)
             if clear_cookie or raw_cookie:
@@ -108,12 +116,14 @@ class NodeSeekSignCustom(_PluginBase):
         """Offer write-only Cookie input, scheduling, and a manual run control."""
         return [
             component("VAlert", type="info", variant="tonal", **{"class": "mb-3"},
-                      text="先在浏览器登录 NodeSeek，再填写会话 Cookie。保存后输入框会清空。"),
+                      text="可直接粘贴浏览器复制的整段 Cookie，插件只保存 session 和 pjwt。保存后输入框会清空。"),
             component("VTextField", model="session_cookie", type="password", label="登录后的 Cookie",
-                      placeholder="session=…; pjwt=…", autocomplete="off"),
+                      placeholder="粘贴完整 Cookie 或 session=…; pjwt=…", autocomplete="off"),
             component("VSwitch", model="auto_enabled", label="启用每日自动签到"),
             component("VTextField", model="attendance_time", type="time", label="签到时间（北京时间）"),
             component("VSwitch", model="random_reward", label="随机奖励"),
+            component("VSwitch", model="use_proxy", label="使用 MoviePilot 系统代理"),
+            component("VSwitch", model="notify", label="推送签到结果通知"),
             component("VSwitch", model="run_once", label="保存并立即签到一次"),
             component("VSwitch", model="confirm_today", label="我已在浏览器完成今天的签到"),
             component("VSwitch", model="clear_cookie", label="清除已保存的 Cookie"),
@@ -124,6 +134,7 @@ class NodeSeekSignCustom(_PluginBase):
         with self._lock:
             records = self._records()
             enabled = self._enabled
+            use_proxy = self._use_proxy
             time = self._time
             exists = self._cookie_path().is_file()
             gate = self.get_data(GATE_KEY)
@@ -131,6 +142,8 @@ class NodeSeekSignCustom(_PluginBase):
             state = ("info", "未配置 Cookie", "点击插件设置，填写浏览器登录后的会话 Cookie。")
         elif gate in PAUSED:
             state = ("warning", STATUS[gate], "请在 NodeSeek 浏览器页面完成登录或验证，之后更新 Cookie。")
+        elif enabled and use_proxy and not self._proxy_url():
+            state = ("warning", "系统代理未配置", "请在 MoviePilot 的网络设置中配置代理。")
         elif self._has_status_today(records, DONE):
             state = ("success", "今日已签到", f"每日计划 {time}（北京时间）" if enabled else "每日自动签到已关闭。")
         elif enabled and not TIME_FORMAT.fullmatch(time):
@@ -206,18 +219,45 @@ class NodeSeekSignCustom(_PluginBase):
             try:
                 cookie = normalize_cookie(self._cookie_path().read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                self._append(AttendanceResult("session_required", "请先配置有效的登录 Cookie。"), source)
+                self._record_and_notify(AttendanceResult("session_required", "请先配置有效的登录 Cookie。"), source)
+                return
+            proxy_url = self._proxy_url() if self._use_proxy else None
+            if self._use_proxy and proxy_url is None:
+                self._record_and_notify(AttendanceResult("proxy_required", "请在 MoviePilot 的网络设置中配置系统代理。"), source)
                 return
             # Leave a pending record across process restarts before submitting the request.
             pending = self._row(AttendanceResult("pending", "签到请求已开始。"), source)
             self._save_log([pending, *self._stored_log()])
-            result = submit_attendance(cookie, self._random_reward)
+            result = submit_attendance(cookie, self._random_reward, proxy_url=proxy_url)
             if result.status in PAUSED:
                 self.save_data(GATE_KEY, result.status)
             stored = self._stored_log()
             finished = {**pending, "status": result.status, "message": result.message, "gain": result.gain}
             self._save_log([finished, *stored[1:]])
             logger.info(f"NS每日签到执行结果：{result.status}")
+            self._notify_result(result, source)
+
+    @staticmethod
+    def _proxy_url():
+        return (settings.PROXY or {}).get("https") or None
+
+    def _record_and_notify(self, result, source):
+        self._append(result, source)
+        self._notify_result(result, source)
+
+    def _notify_result(self, result, source):
+        if not self._notify:
+            return
+        gain = f"\n获得 {result.gain} 个鸡腿。" if result.gain is not None else ""
+        try:
+            self.post_message(
+                mtype=MessageType.SiteMessage,
+                title=f"NS每日签到 · {STATUS[result.status]}",
+                text=f"{source}。{result.message}{gain}",
+                link=FORUM_URL,
+            )
+        except Exception:
+            logger.warning("NS每日签到结果已记录，发送通知失败。")
 
     def _configure_session(self, raw_cookie, clear_cookie):
         try:

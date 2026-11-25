@@ -7,7 +7,7 @@ import requests
 
 
 FORUM_URL = "https://www.nodeseek.com/"
-USER_AGENT = "MoviePilot-NodeSeekSignCustom/0.3.0"
+USER_AGENT = "MoviePilot-NodeSeekSignCustom/0.3.1"
 SESSION_KEYS = ("session", "pjwt")
 COOKIE_VALUE = re.compile(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}\Z")
 MAX_RESPONSE = 64 * 1024

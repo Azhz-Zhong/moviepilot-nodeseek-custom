@@ -34,7 +34,7 @@ STATUS = {
 DEFAULTS = {
     "auto_enabled": False, "attendance_time": "08:30", "random_reward": False,
     "use_proxy": True, "notify": False,
-    "session_cookie": "", "run_once": False, "confirm_today": False, "clear_cookie": False,
+    "session_cookie": "", "run_once": False,
 }
 
 
@@ -56,7 +56,7 @@ class NodeSeekSignCustom(_PluginBase):
     plugin_name = "NS每日签到"
     plugin_desc = "Cookie 自动签到、收益图表和执行日志。"
     plugin_icon = "https://raw.githubusercontent.com/Azhz-Zhong/moviepilot-nodeseek-custom/main/icons/nodeseek.png"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "Azhz-Zhong"
     author_url = "https://github.com/Azhz-Zhong"
     plugin_config_prefix = "nodeseeksigncustom_"
@@ -78,9 +78,10 @@ class NodeSeekSignCustom(_PluginBase):
         config = config or {}
         clean = dict(config)
         raw_cookie = clean.pop("session_cookie", None)
-        clear_cookie = clean.pop("clear_cookie", False) is True
         run_once = clean.pop("run_once", False) is True
-        confirm = clean.pop("confirm_today", False) is True
+        # Drop saved switches from earlier releases without replaying their actions.
+        clean.pop("clear_cookie", None)
+        clean.pop("confirm_today", None)
         with self._lock:
             self._active = True
             self._enabled = clean.get("auto_enabled") is True
@@ -91,10 +92,8 @@ class NodeSeekSignCustom(_PluginBase):
             self._notify = clean.get("notify") is True
             if clean != config:
                 self.update_config(clean)
-            if clear_cookie or raw_cookie:
-                self._configure_session(raw_cookie, clear_cookie)
-            if confirm and not self._has_status_today(self._records(), DONE):
-                self._append(AttendanceResult("confirmed", "已在浏览器完成签到并手动确认。"), "手动确认")
+            if raw_cookie:
+                self._configure_session(raw_cookie)
             if run_once and not scheduler.add_plugin_once_job(
                 self.__class__.__name__, ONCE_JOB, self._manual_run, "NS 立即签到", delay_seconds=3
             ):
@@ -117,16 +116,14 @@ class NodeSeekSignCustom(_PluginBase):
         return [
             component("VAlert", type="info", variant="tonal", **{"class": "mb-3"},
                       text="可直接粘贴浏览器复制的整段 Cookie，插件只保存 session 和 pjwt。保存后输入框会清空。"),
-            component("VTextField", model="session_cookie", type="password", label="登录后的 Cookie",
-                      placeholder="粘贴完整 Cookie 或 session=…; pjwt=…", autocomplete="off"),
+            component("VTextField", model="session_cookie", type="text", label="登录后的 Cookie",
+                      placeholder="粘贴完整 Cookie 或 session=…; pjwt=…", autocomplete="off", spellcheck=False),
             component("VSwitch", model="auto_enabled", label="启用每日自动签到"),
             component("VTextField", model="attendance_time", type="time", label="签到时间（北京时间）"),
             component("VSwitch", model="random_reward", label="随机奖励"),
             component("VSwitch", model="use_proxy", label="使用 MoviePilot 系统代理"),
             component("VSwitch", model="notify", label="推送签到结果通知"),
             component("VSwitch", model="run_once", label="保存并立即签到一次"),
-            component("VSwitch", model="confirm_today", label="我已在浏览器完成今天的签到"),
-            component("VSwitch", model="clear_cookie", label="清除已保存的 Cookie"),
         ], {**DEFAULTS, "attendance_time": self._time}
 
     def get_page(self):
@@ -259,23 +256,18 @@ class NodeSeekSignCustom(_PluginBase):
         except Exception:
             logger.warning("NS每日签到结果已记录，发送通知失败。")
 
-    def _configure_session(self, raw_cookie, clear_cookie):
+    def _configure_session(self, raw_cookie):
         try:
+            cookie = normalize_cookie(raw_cookie if isinstance(raw_cookie, str) else "")
             path = self._cookie_path()
-            if clear_cookie:
-                path.unlink(missing_ok=True)
-                message = "已清除会话 Cookie。"
-            else:
-                cookie = normalize_cookie(raw_cookie) if isinstance(raw_cookie, str) else normalize_cookie("")
-                descriptor, temporary = tempfile.mkstemp(prefix=".session-", dir=path.parent)
-                try:
-                    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                        handle.write(cookie)
-                    os.replace(temporary, path)
-                finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
-                message = "已保存会话 Cookie。"
+            descriptor, temporary = tempfile.mkstemp(prefix=".session-", dir=path.parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(cookie)
+                os.replace(temporary, path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
         except ValueError as error:
             self._append(AttendanceResult("config_error", str(error)), "设置")
             return
@@ -283,7 +275,7 @@ class NodeSeekSignCustom(_PluginBase):
             self._append(AttendanceResult("config_error", "无法写入插件会话文件。"), "设置")
             return
         self.save_data(GATE_KEY, "")
-        self._append(AttendanceResult("configured", message), "设置")
+        self._append(AttendanceResult("configured", "已保存会话 Cookie。"), "设置")
 
     def _cookie_path(self):
         return self.get_data_path() / "session.cookie"

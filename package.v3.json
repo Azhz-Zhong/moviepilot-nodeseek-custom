@@ -1,14 +1,15 @@
 {
   "NodeSeekSignCustom": {
     "name": "NS每日签到",
-    "description": "Cookie 自动签到、收益图表和执行日志。",
+    "description": "自动登录、每日签到、邮件验证续接与收益日志。",
     "labels": "论坛签到,工具",
-    "version": "0.3.2",
+    "version": "0.4.0",
     "icon": "https://raw.githubusercontent.com/Azhz-Zhong/moviepilot-nodeseek-custom/main/icons/nodeseek.png",
     "author": "Azhz-Zhong",
     "level": 1,
     "system_version": ">=3.2.12",
     "history": {
+      "v0.4.0": "接入本机浏览器验证服务，增加账号自动登录、会话续期、邮件验证码续接和分步骤诊断。",
       "v0.3.2": "区分浏览器验证和会话过期，补充 HTTP 诊断与过期通知，移除详情页外链按钮。",
       "v0.3.1": "精简设置项，Cookie 输入时显示明文。",
       "v0.3.0": "增加系统代理和站点通知开关，支持直接粘贴整段 Cookie。",

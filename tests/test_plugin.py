@@ -82,6 +82,32 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(transport.call_args.kwargs["verify_only"])
         self.assertIn("5 鸡腿", str(self.p.get_page()))
 
+    def test_account_change_invalidates_old_session_and_dedupe(self):
+        self.p._append(code.AttendanceResult("already", "old-account", 5), "test")
+        self.p._write_private("pending-login.json", '{"email":"fixture@example.test"}')
+        self.p.save_data(code.GATE_KEY, "email_required")
+        self.p.init_plugin({**self.p.config, "account_username": "new@example.test", "account_password": "new-fixture"})
+        self.assertEqual(self.p._cookie_path().read_text(), "")
+        self.assertEqual(self.p._private_json("pending-login.json"), {})
+        self.assertFalse(self.p.get_data(code.GATE_KEY))
+        self.assertFalse(self.p._has_status_today(self.p._records(), code.DONE))
+        self.assertEqual(self.p.get_form()[1]["account_username"], "new@example.test")
+        self.assertTrue(any(row.get("gain") == 5 for row in self.p._stored_log()))
+
+    def test_changing_email_requires_its_password(self):
+        original = self.p._cookie_path().read_text()
+        self.p.init_plugin({**self.p.config, "account_username": "new@example.test"})
+        self.assertEqual(self.p._private_json("account.json")["username"], "fixture@example.test")
+        self.assertEqual(self.p._cookie_path().read_text(), original)
+
+    def test_stale_pending_email_is_repaired_on_load(self):
+        self.p._write_private("pending-login.json", '{"email":"old@example.test"}')
+        self.p.save_data(code.GATE_KEY, "email_required")
+        self.p.init_plugin(self.p.config)
+        self.assertEqual(self.p._private_json("pending-login.json"), {})
+        self.assertFalse(self.p.get_data(code.GATE_KEY))
+        self.assertEqual(self.p._private_json("account.json")["username"], "fixture@example.test")
+
 
 if __name__ == "__main__":
     unittest.main()

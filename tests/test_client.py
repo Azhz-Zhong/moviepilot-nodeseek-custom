@@ -157,6 +157,10 @@ class LifecycleTests(unittest.TestCase):
         result, calls, _, _ = self.execute([Response(200, {"record": None})], verify_only=True)
         self.assertEqual((result.status, len(calls)), ("uncertain", 1))
 
+    def test_pending_email_cannot_override_current_account(self):
+        result, calls, saved, _ = self.execute([], email_code="123456", pending_login={"email": "old@example.test"})
+        self.assertEqual((result.status, calls, saved), ("config_error", [], []))
+
     def test_service_unready_is_sanitized(self):
         fake = Session([Response(500, {"code": 500, "message": "The scanner is not ready yet fixture-secret"})])
         with patch.object(browser.requests, "Session", return_value=fake):

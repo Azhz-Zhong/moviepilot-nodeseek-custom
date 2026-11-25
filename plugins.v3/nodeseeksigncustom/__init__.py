@@ -6,6 +6,7 @@ import json
 import re
 import tempfile
 from threading import RLock
+from uuid import uuid4
 
 from apscheduler.triggers.cron import CronTrigger
 
@@ -68,7 +69,7 @@ class NodeSeekSignCustom(_PluginBase):
     plugin_name = "NS每日签到"
     plugin_desc = "自动登录、每日签到、邮件验证续接与收益日志。"
     plugin_icon = "https://raw.githubusercontent.com/Azhz-Zhong/moviepilot-nodeseek-custom/main/icons/nodeseek.png"
-    plugin_version = "0.4.0"
+    plugin_version = "0.4.1"
     plugin_author = "Azhz-Zhong"
     author_url = "https://github.com/Azhz-Zhong"
     plugin_config_prefix = "nodeseeksigncustom_"
@@ -110,8 +111,6 @@ class NodeSeekSignCustom(_PluginBase):
             self._notify = clean.get("notify") is True
             if clean != config:
                 self.update_config(clean)
-            if raw_cookie:
-                self._configure_session(raw_cookie)
             if raw_service:
                 try:
                     self._write_private("browser-service.json", json.dumps({"url": normalize_service_url(raw_service)}))
@@ -120,6 +119,8 @@ class NodeSeekSignCustom(_PluginBase):
                 except (ValueError, OSError):
                     self._append(AttendanceResult("config_error", "验证服务配置保存失败，请检查地址格式。"), "设置")
             account = self._private_json("account.json")
+            previous_email = str(account.get("username") or account.get("email") or "").strip().casefold()
+            reset_session = False
             if username or password or email or account.get("email"):
                 # One email identifies both password login and email-code login.
                 canonical_email = str(username or email or account.get("email") or account.get("username") or "").strip()
@@ -127,15 +128,36 @@ class NodeSeekSignCustom(_PluginBase):
                 account.pop("email", None)
                 if password:
                     account["password"] = str(password)
-                if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", canonical_email) and account.get("password"):
+                changed = bool(previous_email and previous_email != canonical_email.casefold())
+                if changed and not password:
+                    self._append(AttendanceResult("config_error", "更换登录邮箱时请同时填写该账号的密码，原账号保持不变。"), "设置")
+                    account = self._private_json("account.json")
+                elif re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", canonical_email) and account.get("password"):
                     try:
                         self._write_private("account.json", json.dumps(account))
+                        reset_session = changed
                         if self.get_data(GATE_KEY) in {"login_failed", "session_required", "session_expired"}:
                             self.save_data(GATE_KEY, "")
                     except OSError:
                         self._append(AttendanceResult("config_error", "账号配置保存失败。"), "设置")
                 else:
                     self._append(AttendanceResult("config_error", "请填写有效的登录邮箱；首次配置需同时填写密码。"), "设置")
+            account = self._private_json("account.json")
+            pending = self._private_json("pending-login.json")
+            mismatch = bool(pending.get("email") and account.get("username") and
+                            pending["email"].casefold() != account["username"].casefold())
+            if reset_session or mismatch:
+                self._write_private("session.cookie", "")
+                self._write_private("pending-login.json", "{}")
+                self.save_data(GATE_KEY, "")
+                self.save_data("account_scope", uuid4().hex)
+                self._email_code = ""
+                if email_code:
+                    email_code = None
+                    run_once = False
+                self._append(AttendanceResult("configured", "已按当前登录邮箱重置旧会话与验证码状态，请重新登录。"), "设置")
+            if raw_cookie:
+                self._configure_session(raw_cookie)
             if email_code:
                 self._email_code = str(email_code).strip()
                 run_once = True
@@ -164,7 +186,8 @@ class NodeSeekSignCustom(_PluginBase):
         """Compact responsive login/schedule sections with optional advanced fields."""
         field = {"variant": "outlined", "density": "comfortable", "hide-details": "auto"}
         toggle = {"color": "primary", "density": "compact", "hide-details": True}
-        account_exists = bool(self._private_json("account.json"))
+        account = self._private_json("account.json")
+        account_exists = bool(account)
         service_exists = bool(self._private_json("browser-service.json").get("url"))
 
         def col(element, sm=6):
@@ -178,10 +201,10 @@ class NodeSeekSignCustom(_PluginBase):
 
         return [
             component("VAlert", type="info", variant="tonal", density="compact", **{"class": "mb-3"},
-                      text="会话过期后自动登录，需要邮件验证码时通知你。已保存的信息留空即可保留。"),
+                      text="使用下方登录邮箱自动登录；需要邮件验证码时通知你。密码留空保留，更换邮箱时请同时填写新密码。"),
             section("账号登录", [
                 col(component("VTextField", model="account_username", type="email", label="登录邮箱", autocomplete="off",
-                    hint="已保存，可留空" if account_exists else "同时用于账号登录与邮件验证", **field)),
+                    hint="当前使用的邮箱，可修改" if account_exists else "同时用于账号登录与邮件验证", **field)),
                 col(component("VTextField", model="account_password", type="password", label="登录密码", autocomplete="new-password",
                     hint="已保存，可留空" if account_exists else "首次配置请填写", **field)),
                 col(component("VTextField", model="email_code", label="邮件验证码", autocomplete="off",
@@ -208,7 +231,7 @@ class NodeSeekSignCustom(_PluginBase):
                 ]),
             ]),
             component("VSwitch", model="run_once", label="保存后立即检查并签到", **toggle),
-        ], {**DEFAULTS, "attendance_time": self._time}
+        ], {**DEFAULTS, "attendance_time": self._time, "account_username": account.get("username", "")}
 
     def get_page(self):
         """Render the session status, seven-day gain chart, and recent executions."""
@@ -446,12 +469,14 @@ class NodeSeekSignCustom(_PluginBase):
 
     def _has_status_today(self, records, statuses):
         today = self._now().date().isoformat()
-        return any(row["day"] == today and row["status"] in statuses for row in records)
+        scope = self.get_data("account_scope")
+        return any(row.get("account_scope") == scope and row["day"] == today and row["status"] in statuses for row in records)
 
     def _row(self, result, source):
         now = self._now()
         return {"day": now.date().isoformat(), "time": now.isoformat(timespec="seconds"),
-                "status": result.status, "message": result.message, "gain": result.gain, "source": source}
+                "status": result.status, "message": result.message, "gain": result.gain, "source": source,
+                "account_scope": self.get_data("account_scope")}
 
     def _chart(self, records):
         today = self._now().date()
@@ -459,6 +484,8 @@ class NodeSeekSignCustom(_PluginBase):
         gains = {}
         confirmed = set()
         for row in records:
+            if row.get("account_scope") != self.get_data("account_scope"):
+                continue
             if row["status"] in DONE:
                 confirmed.add(row["day"])
                 if row.get("gain") is not None:

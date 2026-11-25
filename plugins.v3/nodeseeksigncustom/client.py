@@ -12,7 +12,7 @@ import requests
 
 
 FORUM_URL = "https://www.nodeseek.com/"
-USER_AGENT = "MoviePilot-NodeSeekSignCustom/0.4.0"
+USER_AGENT = "MoviePilot-NodeSeekSignCustom/0.4.1"
 SESSION_KEYS = ("session", "pjwt", "smac")
 COOKIE_VALUE = re.compile(r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]{1,4096}\Z")
 MAX_RESPONSE = 64 * 1024
@@ -185,6 +185,11 @@ def _managed_attendance(cookie, random_reward, *, proxy_url, browser_service, cr
     def finish(result):
         return replace(result, **meta, elapsed_ms=round((perf_counter() - started) * 1000))
 
+    configured_email = (credentials or {}).get("email") or (credentials or {}).get("username")
+    pending_email = (pending_login or {}).get("email")
+    if configured_email and pending_email and configured_email.casefold() != pending_email.casefold():
+        return finish(AttendanceResult("config_error", "旧验证码不属于当前登录邮箱，请重新发起登录。", reason="待验证邮箱与当前账号不一致"))
+
     if browser_service:
         try:
             from curl_cffi import requests as browser_requests
@@ -297,7 +302,7 @@ def _managed_attendance(cookie, random_reward, *, proxy_url, browser_service, cr
                 if isinstance(payload, dict):
                     redirect = payload.get("redirect")
                     if isinstance(redirect, str) and "emailsignin" in urlsplit(redirect).path.lower():
-                        email = parse_qs(urlsplit(redirect).query).get("email", [None])[0] or credentials.get("email") or credentials.get("username")
+                        email = configured_email or parse_qs(urlsplit(redirect).query).get("email", [None])[0]
                         return request_email(email)
                     if payload.get("need2FA"):
                         return AttendanceResult("login_failed", "账号启用了额外的 2FA 验证，请在浏览器登录后更新 Cookie。", reason="需要账号二次验证")
@@ -317,7 +322,7 @@ def _managed_attendance(cookie, random_reward, *, proxy_url, browser_service, cr
             if email_code:
                 login_used = True
                 meta["stage"] = "邮件验证"
-                email = (pending_login or {}).get("email") or (credentials or {}).get("email") or (credentials or {}).get("username")
+                email = configured_email or pending_email
                 if not email or not re.fullmatch(r"[A-Za-z0-9]{4,12}", email_code):
                     return finish(AttendanceResult("email_required", "请检查绑定邮箱和邮件验证码格式。", reason="验证码输入无效"))
                 for entry in list(session.cookies.jar):

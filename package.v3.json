@@ -1,14 +1,15 @@
 {
   "NodeSeekSignCustom": {
-    "name": "NodeSeek 签到助手",
-    "description": "提供浏览器签到入口、每日提醒和确认记录。",
-    "labels": "论坛签到,提醒",
-    "version": "0.1.0",
-    "icon": "",
+    "name": "NS每日签到",
+    "description": "Cookie 自动签到、收益图表和执行日志。",
+    "labels": "论坛签到,工具",
+    "version": "0.2.0",
+    "icon": "https://raw.githubusercontent.com/Azhz-Zhong/moviepilot-nodeseek-custom/main/icons/nodeseek.png",
     "author": "Azhz-Zhong",
     "level": 1,
     "system_version": ">=3.2.12",
     "history": {
+      "v0.2.0": "增加会话 Cookie 自动签到、近 7 天收益和执行日志，更新插件名称与图标。",
       "v0.1.0": "发布浏览器签到入口、每日提醒和本地确认记录。"
     }
   }

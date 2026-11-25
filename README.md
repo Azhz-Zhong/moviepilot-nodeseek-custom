@@ -1,21 +1,25 @@
-# NodeSeek 签到助手
+# NS每日签到
 
-独立的 MoviePilot V3 插件，插件 ID 为 `NodeSeekSignCustom`。支持浏览器签到入口、北京时间每日提醒，以及最近 30 条的签到确认记录。最低要求为 MoviePilot V3.2.12。
+独立的 MoviePilot V3 插件，插件 ID 为 `NodeSeekSignCustom`。最低要求为 MoviePilot V3.2.12。
 
 ## 安装
 
-将本仓库的 `main` 分支发布到 GitHub 后，在 MoviePilot 的插件市场添加仓库地址 `https://github.com/Azhz-Zhong/moviepilot-nodeseek-custom`，搜索「NodeSeek 签到助手」，安装后打开插件详情页。
+在 MoviePilot 的插件市场添加 `https://github.com/Azhz-Zhong/moviepilot-nodeseek-custom`，搜索「NS每日签到」并安装。已安装时可直接检查插件更新。
 
-## 签到和提醒
+## 配置和运行
 
-1. 在插件详情页点「打开 NodeSeek」，在论坛网页完成登录、邮件确认和签到。
-2. 签到完成后，回到 MoviePilot 的插件配置，勾选「我已在论坛完成今天的签到」并保存。当天只写一次记录，详情页会显示确认时间。
-3. 需要提醒时启用「每日提醒」并设定北京时间。提醒使用 MoviePilot 已配置的插件通知渠道。已经确认签到的那天会跳过提醒。
+1. 在浏览器登录 NodeSeek，完成论坛要求的邮件确认或浏览器验证。
+2. 打开插件设置，在「登录后的 Cookie」填写普通会话内容 `session=…; pjwt=…`。保存后输入框恢复为空。会话保存在飞牛的插件数据目录，清除会话可使用对应开关。
+3. 开启每日自动签到，设定北京时间和奖励模式。也可勾选「保存并立即签到一次」做首次验证。
+4. 打开插件详情查看近 7 天的鸡腿收益，以及每次执行的时间、来源和结果。
 
-签到确认是本地记录，论坛上的实际签到结果以 NodeSeek 页面显示为准。登录与验证都在站点的浏览器页面完成。插件数据只保存本地签到日期、确认时间和提醒日期。
+当站点要求重新登录或浏览器验证，插件暂停提交，直到更新 Cookie。连接中断等无法判断的情况记录为待确认，先在浏览器核对当天结果。已经签到的同一天会跳过后续请求。
+
+图表使用站点实际返回的收益。旧版手动确认记录仍可查看，手动确认时不估算鸡腿数量。
 
 ## 开发结构
 
 - `package.v3.json` 是插件市场索引。
-- `plugins.v3/nodeseeksigncustom/__init__.py` 是插件入口，使用 MoviePilot V3 SDK 加载配置、保存记录和发送提醒。
-- `har/` 是本地调试目录，已通过 Git 忽略。开发或测试使用去标识化的数据。
+- `plugins.v3/nodeseeksigncustom/` 包含插件入口和签到请求逻辑。
+- `har/` 属于本地调试，已通过 Git 忽略。测试只用合成数据。
+- 插件卡片图标源自 NodeSeek 官网公开的站点图标。

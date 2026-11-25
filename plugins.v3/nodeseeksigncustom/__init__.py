@@ -22,12 +22,18 @@ TIME_FORMAT = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d", re.ASCII)
 LOG_KEY = "attendance_log"
 GATE_KEY = "session_block"
 DONE = {"success", "already", "confirmed"}
-PAUSED = {"session_required", "verification"}
+PAUSE_GUIDANCE = {
+    "session_expired": "站点报告会话已过期，请在浏览器登录后更新 Cookie。",
+    "session_required": "站点要求登录。若浏览器仍已登录，可检查执行日志里的 HTTP 状态再更新 Cookie。",
+    "verification": "站点要求浏览器验证，自动签到已暂停。",
+    "forbidden": "站点拒绝了当前请求，请查看执行日志中的 HTTP 状态和原因。",
+}
 ONCE_JOB = "attendance_once"
 STATUS = {
     "success": "签到成功", "already": "已签到", "confirmed": "手动确认",
     "pending": "请求进行中", "uncertain": "结果待确认", "failed": "失败",
-    "verification": "需要浏览器验证", "session_required": "需要更新 Cookie",
+    "verification": "需要浏览器验证", "session_required": "需要登录",
+    "session_expired": "Cookie 已过期", "cookie_missing": "未配置有效 Cookie", "forbidden": "站点拒绝访问",
     "rate_limited": "请求受限", "skipped": "跳过", "configured": "已保存会话", "config_error": "配置失败",
     "proxy_required": "代理未配置", "proxy_error": "代理连接失败", "connect_error": "网络连接超时",
 }
@@ -56,7 +62,7 @@ class NodeSeekSignCustom(_PluginBase):
     plugin_name = "NS每日签到"
     plugin_desc = "Cookie 自动签到、收益图表和执行日志。"
     plugin_icon = "https://raw.githubusercontent.com/Azhz-Zhong/moviepilot-nodeseek-custom/main/icons/nodeseek.png"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "Azhz-Zhong"
     author_url = "https://github.com/Azhz-Zhong"
     plugin_config_prefix = "nodeseeksigncustom_"
@@ -137,8 +143,8 @@ class NodeSeekSignCustom(_PluginBase):
             gate = self.get_data(GATE_KEY)
         if not exists:
             state = ("info", "未配置 Cookie", "点击插件设置，填写浏览器登录后的会话 Cookie。")
-        elif gate in PAUSED:
-            state = ("warning", STATUS[gate], "请在 NodeSeek 浏览器页面完成登录或验证，之后更新 Cookie。")
+        elif gate in PAUSE_GUIDANCE:
+            state = ("warning", STATUS[gate], PAUSE_GUIDANCE[gate])
         elif enabled and use_proxy and not self._proxy_url():
             state = ("warning", "系统代理未配置", "请在 MoviePilot 的网络设置中配置代理。")
         elif self._has_status_today(records, DONE):
@@ -155,13 +161,12 @@ class NodeSeekSignCustom(_PluginBase):
                 "state": STATUS.get(row["status"], row["status"]),
                 "gain": row["gain"] if row.get("gain") is not None else "—",
                 "message": row["message"],
+                "diagnostic": self._diagnostics(row),
             }
             for row in records
         ]
         return [
             component("VAlert", type=tone, title=title, variant="tonal", **{"class": "mb-3"}, text=detail),
-            component("VBtn", text="打开 NodeSeek", href=FORUM_URL, target="_blank",
-                      rel="noopener noreferrer", variant="tonal", **{"class": "mb-3"}),
             component("VCard", variant="outlined", **{"class": "mb-3"}, content=[
                 component("VCardTitle", text="近 7 天签到收益"),
                 component("VCardText", content=self._chart(records)),
@@ -174,6 +179,7 @@ class NodeSeekSignCustom(_PluginBase):
                     {"title": "状态", "key": "state"},
                     {"title": "鸡腿", "key": "gain"},
                     {"title": "结果", "key": "message"},
+                    {"title": "诊断详情", "key": "diagnostic"},
                 ], items=rows, density="compact", **{"items-per-page": 10, "no-data-text": "尚无执行日志。"}),
             ]),
         ]
@@ -216,7 +222,7 @@ class NodeSeekSignCustom(_PluginBase):
             try:
                 cookie = normalize_cookie(self._cookie_path().read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                self._record_and_notify(AttendanceResult("session_required", "请先配置有效的登录 Cookie。"), source)
+                self._record_and_notify(AttendanceResult("cookie_missing", "请先配置有效的登录 Cookie。"), source)
                 return
             proxy_url = self._proxy_url() if self._use_proxy else None
             if self._use_proxy and proxy_url is None:
@@ -224,15 +230,29 @@ class NodeSeekSignCustom(_PluginBase):
                 return
             # Leave a pending record across process restarts before submitting the request.
             pending = self._row(AttendanceResult("pending", "签到请求已开始。"), source)
+            pending["route"] = "系统代理" if proxy_url else "直连"
             self._save_log([pending, *self._stored_log()])
             result = submit_attendance(cookie, self._random_reward, proxy_url=proxy_url)
-            if result.status in PAUSED:
+            if result.status in PAUSE_GUIDANCE:
                 self.save_data(GATE_KEY, result.status)
             stored = self._stored_log()
-            finished = {**pending, "status": result.status, "message": result.message, "gain": result.gain}
+            finished = {
+                **pending, "status": result.status, "message": result.message, "gain": result.gain,
+                "http_status": result.http_status, "elapsed_ms": result.elapsed_ms,
+                "response_type": result.response_type, "reason": result.reason,
+            }
             self._save_log([finished, *stored[1:]])
-            logger.info(f"NS每日签到执行结果：{result.status}")
+            logger.info(f"NS每日签到 {source} | {STATUS[result.status]} | {self._diagnostics(finished)}")
             self._notify_result(result, source)
+
+    @staticmethod
+    def _diagnostics(row):
+        parts = [row[key] for key in ("route", "response_type", "reason") if row.get(key)]
+        if row.get("http_status") is not None:
+            parts.insert(1, f"HTTP {row['http_status']}")
+        if row.get("elapsed_ms") is not None:
+            parts.append(f"{row['elapsed_ms']} ms")
+        return " · ".join(parts) or "—"
 
     @staticmethod
     def _proxy_url():
